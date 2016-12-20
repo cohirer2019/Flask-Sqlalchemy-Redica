@@ -65,7 +65,7 @@ class CachingSQLAlchemy(SQLAlchemy):
             key_mangler = functools.partial(md5_key_mangler, self.key_prefix)
 
             self.regions = dict(
-                default=make_region().configure({
+                default=make_region().configure(**{
                     'backend': 'extended_redis_backend',
                     'expiration_time': expiration_time,
                     'arguments': {

@@ -1,4 +1,4 @@
-# coding: UTF-8
+# -*- coding: utf-8 -*-
 import unittest
 
 from flask import Flask
@@ -8,7 +8,9 @@ from flask_sqlalchemy_redica import CachingSQLAlchemy
 db = CachingSQLAlchemy()
 
 
-class Country(db.Model):
+class DummyUser(db.Model):
+    cache_enable = True
+
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
 
@@ -21,7 +23,7 @@ class Country(db.Model):
 
 def create_app():
     app = Flask(__name__)
-    app.config['CACHE_TYPE'] = 'simple'
+    app.config['REDICA_CACHE_URL'] = 'redis://localhost:6379/2'
     db.init_app(app)
     return app
 
@@ -33,7 +35,7 @@ class TestFromCache(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
-        db.session.add(Country(name='Brazil'))
+        db.session.add(DummyUser(name='Brazil'))
         db.session.commit()
 
     def tearDown(self):
@@ -42,15 +44,15 @@ class TestFromCache(unittest.TestCase):
         self.ctx.pop()
 
     def test_cache_hit(self):
-        q = Country.query.order_by(Country.name.desc())
-        caching_q = q.options(FromCache(cache))
+        q = DummyUser.query.order_by(DummyUser.name.desc())
+        caching_q = q.options(DummyUser.cache.from_cache())
 
         # cache miss
         country = caching_q.first()
         self.assertEqual('Brazil', country.name)
 
         # add another record
-        c = Country(name='Germany')
+        c = DummyUser(name='Germany')
         db.session.add(c)
         db.session.commit()
 

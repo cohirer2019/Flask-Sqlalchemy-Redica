@@ -14,4 +14,4 @@ class ExtendRedisBackend(RedisBackend):
         return self.client.keys(pattern)
 
 register_backend(
-    "extended_redis_backend", "flask_sqlalchemy_redica", "ExtendRedisBackend")
+    "extended_redis_backend", "flask_sqlalchemy_redica.redis", "ExtendRedisBackend")
