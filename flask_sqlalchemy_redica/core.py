@@ -31,8 +31,10 @@ class CachingSQLAlchemy(SQLAlchemy):
 
         self.cache_invalidator_class = kwargs.pop(
             'invalidator_class', CachingInvalidator)
-        self.cache_invalidator_sync = kwargs.pop(
-            'invalidator_sync', False)
+        self.cache_invalidator_async = kwargs.pop(
+            'invalidator_async', False)
+        self.cache_invalidator_callback = kwargs.pop(
+            'invalidator_callback', None)
 
         self.query_cls = query_callable(self.regions)
 
@@ -88,6 +90,7 @@ class CachingSQLAlchemy(SQLAlchemy):
         if ctx is not None:
             if not hasattr(ctx, '_redica_invalidator'):
                 ctx._redica_invalidator = CachingInvalidator(
-                    self.cache_invalidator_sync)
+                    self.cache_invalidator_async,
+                    self.cache_invalidator_callback)
             return ctx._redica_invalidator
 
