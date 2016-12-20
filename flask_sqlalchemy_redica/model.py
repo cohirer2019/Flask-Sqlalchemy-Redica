@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
+import importlib
 import itertools
 
 import functools
 from blinker import signal
 from dogpile.cache.api import NO_VALUE
+from flask import current_app
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import event, inspect
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import get_history
 from sqlalchemy.orm.base import PASSIVE_NO_INITIALIZE
+from werkzeug.local import LocalProxy
 
 from .cache import FromCache
 
@@ -21,6 +25,10 @@ class Cache(object):
         self.exclude_columns = set(exclude_columns) \
             if exclude_columns else set()
         self.columns = None
+
+        if not regions:
+            redica_ext = current_app.extensions['sqlalchemy_redica']
+            self.regions = redica_ext.regions
 
     def get(self, pk):
         return self.model.query.options(self.from_cache(pk=pk)).get(pk)
@@ -128,29 +136,105 @@ class Cache(object):
             self.flush_caches(obj_pk)
 
 
-flush_signal = signal('_flask_sqlalchemy_redica_flush')
+_flush_signal = signal('_flask_sqlalchemy_redica_flush')
 
 
-class SignalMixin(object):
-    receive_signal = True
+class CacheableMixin(object):
+    cache_enable = True
+    cache_label = 'default'
+    cache_regions = None
+    cache_expiration_time = 3600
+    cache_columns = ()
+    # these columns will not produce cache indices
+    cache_exclude_columns = ()
 
+    cache_invalidate = True
+    cache_invalidate_columns = ()
+    cache_invalidate_queries = ()
+    cache_invalidate_relationships = ()
     # these columns changes will not produce cache flush
-    exclude_listen_columns = {'update_at', 'create_at'}
-    cached_notify_relationships = ()
+    cache_invalidate_exclude_columns = {'update_at', 'create_at'}
+
+    cache_invalidate_notify = True
+    cache_invalidate_notify_relationships = ()
 
     _initialized = False
-    _listen_columns = set()
     _all_columns = set()
 
+    @declared_attr.cascading
+    def cache(cls):
+        if cls.cache_enable:
+            return Cache(
+                cls, cls.cache_regions, cls.cache_label,
+                exclude_columns=cls.cache_exclude_columns
+            )
+
     @classmethod
-    def init_listen_columns(cls, mapper):
+    def _flush_all(cls, target_id, target):
+        if cls.cache_enable and cls.cache_invalidate:
+            if target:
+                cls.cache.flush_all(target)
+            elif target_id:
+                cls.cache.flush_caches(target_id)
+
+    @classmethod
+    def relationship_cache_key(cls, pk, relation_name):
+        return cls.cache.cache_relationship_key(pk, relation_name)
+
+    @classmethod
+    def query_cache_key(cls, pk, query_name):
+        return cls.cache.cache_query_key(pk, query_name)
+
+    @classmethod
+    def on_invalidate_notify(cls, sender, **kw):
+        target = kw.get('target')
+        target_id = kw.get('target_id')
+        src = kw.get('src')
+        ev = kw.get('event')
+
+        cls._flush_all(target_id, target)
+
+        if src == 'on_model_changed' \
+                and ev == 'update' \
+                and not cls.has_changes(target):
+            # for self update, if no changes, then do not notify others
+            return
+
+        delay = True
+        if ev == 'delete' or src != 'on_model_changed':
+            # deletion need flush right away
+            delay = False
+
+        cls._notify_all(target, ev, delay=delay)
+
+    @classmethod
+    def listen_mapper_events(cls, mapper, sender, callback):
+        object_update_callback = functools.partial(
+            callback, sender, 'update')
+        object_delete_callback = functools.partial(
+            callback, sender, 'delete')
+        object_insert_callback = functools.partial(
+            callback, sender, 'insert')
+        event.listen(mapper, 'after_update', object_update_callback)
+        event.listen(mapper, 'after_delete', object_delete_callback)
+        event.listen(mapper, 'after_insert', object_insert_callback)
+
+    @classmethod
+    def on_model_changed(cls, *args):
+        sender, ev, _, _, target = args
+        kwargs = dict(module=cls.__module__, model=sender,
+                      target=target, event=ev, src='on_model_changed')
+        _flush_signal.send(sender, **kwargs)
+
+    @classmethod
+    def init_invalidate_columns(cls, mapper):
         cls._all_columns = set(mapper.attrs.keys())
-        cls._listen_columns = \
-            cls._listen_columns or cls._all_columns - cls.exclude_listen_columns
+        cls.cache_invalidate_columns = cls.cache_invalidate_columns or \
+            cls._all_columns - cls.cache_invalidate_exclude_columns
 
     @classmethod
     def has_changes(cls, target, use_all=False):
-        columns = cls._all_columns if use_all else cls._listen_columns
+        columns = cls._all_columns if use_all else cls.cache_invalidate_columns
         for column in columns:
             if get_history(target, column,
                            passive=PASSIVE_NO_INITIALIZE).has_changes():
@@ -177,184 +261,90 @@ class SignalMixin(object):
             yield obj
 
     @classmethod
-    def _notify_all(cls, target, ev, delay=False, indent=4):
+    def _notify_all(cls, target, ev, delay=False):
         if not target:
             return
 
         mapper = inspect(cls).mapper
-        for r in cls.cached_notify_relationships:
+        for r in cls.cache_invalidate_notify_relationships:
             attr = mapper.attrs.get(r)
             sender = attr.mapper.class_.__name__
             for obj in cls.relation_changes(target, attr, r):
+                kwargs = dict(
+                    module=attr.mapper.class_.__module__, model=sender,
+                    target=target, target_id=obj.id, event=ev, src='on_notify')
                 if delay:
-                    cache_invalidator.check_item(
-                        [ev, attr.mapper.class_.__module__, sender, obj.id])
+                    cache_invalidator.invalidate(**kwargs)
                 else:
-                    flush_signal.send(
-                        sender, target=obj, event=ev, indent=indent+4)
-
-    @classmethod
-    def receive_flush_signal(cls, sender, **kw):
-        target = kw.get('target')
-        src = kw.get('src')
-        ev = kw.get('event')
-        indent = kw.get('indent', 4)
-
-        if src == 'on_model_changed' \
-                and ev == 'update' \
-                and not cls.has_changes(target):
-            # for self update, if no changes, then do not notify others
-            return
-
-        delay = True
-        if ev == 'delete' or src != 'on_model_changed':
-            # deletion need flush right away
-            delay = False
-
-        cls._notify_all(target, ev, delay=delay, indent=indent)
-
-    @classmethod
-    def listen_mapper_events(cls, mapper, sender, callback):
-        object_update_callback = functools.partial(
-            callback, sender, 'update')
-        object_delete_callback = functools.partial(
-            callback, sender, 'delete')
-        object_insert_callback = functools.partial(
-            callback, sender, 'insert')
-        event.listen(mapper, 'after_update', object_update_callback)
-        event.listen(mapper, 'after_delete', object_delete_callback)
-        event.listen(mapper, 'after_insert', object_insert_callback)
-
-    @classmethod
-    def on_model_changed(cls, *args):
-        sender, ev, _, _, target = args
-        flush_signal.send(
-            sender, target=target, event=ev, src='on_model_changed')
+                    _flush_signal.send(sender, **kwargs)
 
     @classmethod
     def __declare_last__(cls):
-        if not cls.receive_signal or cls._initialized:
+        if cls._initialized:
+            return
+
+        if not cls.cache_enable and \
+                not cls.cache_invalidate and \
+                not cls.cache_invalidate_notify:
             return
 
         mapper = inspect(cls).mapper
         sender = mapper.class_.__name__
         cls.listen_mapper_events(mapper, sender, cls.on_model_changed)
-        flush_signal.connect(
-            cls.receive_flush_signal, sender=sender, weak=False)
+        _flush_signal.connect(
+            cls.on_invalidate_notify, sender=sender, weak=False)
 
         base_mapper = inspect(cls).mapper.base_mapper
         if base_mapper != mapper:
             sender = base_mapper.class_.__name__
-            cls.listen_mapper_events(base_mapper, sender, cls.on_model_changed)
-            flush_signal.connect(
-                cls.receive_flush_signal, sender=sender, weak=False)
+            cls.listen_mapper_events(base_mapper, sender,
+                                     cls.on_model_changed)
+            _flush_signal.connect(
+                cls.on_invalidate_notify, sender=sender, weak=False)
 
-        cls.init_listen_columns(mapper)
+        cls.init_invalidate_columns(mapper)
         cls._initialized = True
 
 
-class CacheableMixin(SignalMixin):
-    cacheable = True
-    cache_label = 'default'
-    cache_regions = None
-    cached_queries = ()
-    cached_relationships = ()
-    # these columns will not produce cache indices
-    cache_exclude_columns = ()
-
-    @declared_attr
-    def cache(cls):
-        return Cache(
-            cls, cls.cache_regions, cls.cache_label,
-            exclude_columns=cls.cache_exclude_columns
-        )
-
-    @classmethod
-    def _flush_all(cls, target_id, target, indent=4):
-        if not cls.cacheable:
-            return
-
-        if target:
-            cls.cache.flush_all(target, indent)
-        elif target_id:
-            cls.cache.flush_caches(target_id, indent)
-
-    @classmethod
-    def relationship_cache_key(cls, pk, relation_name):
-        return cls.cache.cache_relationship_key(pk, relation_name)
-
-    @classmethod
-    def query_cache_key(cls, pk, query_name):
-        return cls.cache.cache_query_key(pk, query_name)
-
-    @classmethod
-    def receive_flush_signal(cls, sender, **kw):
-        super(CacheableMixin, cls).receive_flush_signal(sender, **kw)
-        target = kw.get('target')
-        target_id = kw.get('target_id')
-        indent = kw.get('indent', 4)
-        cls._flush_all(target_id, target, indent)
-
-    @classmethod
-    def __declare_last__(cls):
-        if cls.cacheable:
-            super(CacheableMixin, cls).__declare_last__()
+def do_flush(invalidator):
+    session = current_app.extensions['sqlalchemy_redica'].session
+    invalidator.invalidate_nofity(session)
 
 
-def get_check_list(instance):
-    key = '_delay_checker_check_list_{}'.format(id(instance))
-    check_list = getattr(g, key, None)
-    if check_list is None:
-        check_list = []
-        setattr(g, key, check_list)
-    return check_list
+class CachingInvalidator:
+    def __init__(self, async=False, callback=None):
+        self.items = []
+        self.async = async
+        self.callback = callback or do_flush
+
+    def invalidate(self, **kwargs):
+        if self.async:
+            kwargs.pop('target', None)
+        self.items.append(kwargs)
+
+    def invalidate_nofity(self, session):
+        for info in self.items:
+            info['src'] = 'on_flush'
+            module = info.get('module')
+            model = info.get('model')
+            target = info.get('target')
+            target_id = info.get('target_id')
+            if not target and target_id:
+                model_cls = getattr(importlib.import_module(module), model)
+                info['target'] = session.query(model_cls).get(target_id)
+            _flush_signal.send(model, **info)
+
+    def flush(self):
+        self.callback(self)
 
 
-class DelayedChecker(object):
-    ''' DelayedChecker is used for tracking db changes after data model
-        committed. It pushes check_mothod to celery queus so that no main
-        thread performance would be affected.
-    '''
-    def __init__(
-            self, check_method, stamp_time=False, batch=False,
-            immediate=False):
+def _get_cache_invalidator():
+    redica_ext = current_app.extensions['sqlalchemy_redica']
+    return redica_ext.cache_invalidator
 
-        assert 'check_method specified as string can\'t be called ' \
-               'immediately', not isinstance(check_method, basestring) or \
-                              not immediate
+cache_invalidator = LocalProxy(lambda: _get_cache_invalidator())
 
-        self.check_list = LocalProxy(lambda: get_check_list(self))
-        self.check_method = check_method
-        self.stamp_time = stamp_time
-        self.batch = batch
-        self.immediate = immediate
 
-    def check_item(self, info):
-        if info and info not in self.check_list:
-            self.check_list.append(info)
-
-    def call_check_method(self, *args, **kw):
-        if isinstance(self.check_method, basestring):
-            celery.send_task(self.check_method, args=args, kwargs=kw)
-        elif self.immediate:
-            self.check_method(*args, **kw)
-        else:
-            self.check_method.delay(*args, **kw)
-
-    def flush(self, *args, **kwargs):
-        if not self.check_list:
-            return
-
-        if self.stamp_time:
-            # flush_at is mainly called for check_method to compare with
-            # update_at field of the object / objects to determine whether
-            # the real action need to take place
-            kwargs['flushed_at'] = utcnow()
-
-        check_list = self.check_list[:]
-        self.check_list = []
-        if self.batch:
-            self.call_check_method(check_list, **kwargs)
-        else:
-            map(lambda info: self.call_check_method(
-                info, **kwargs), check_list)
+@event.listens_for(Session, 'after_commit')
+def cache_after_commit(session):
+    cache_invalidator.flush()

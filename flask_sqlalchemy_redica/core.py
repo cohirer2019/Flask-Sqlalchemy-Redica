@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import functools
+import importlib
 
 from dogpile.cache.region import make_region
 from sqlalchemy.ext.declarative import declarative_base
@@ -14,11 +15,11 @@ from flask_sqlalchemy import SQLAlchemy, Model, _BoundDeclarativeMeta, \
 
 from .utils import md5_key_mangler
 from .cache import CachingQuery, query_callable
-from .model import CacheableMixin
+from .model import CacheableMixin, CachingInvalidator
 
 
 class CachingModel(Model, CacheableMixin):
-    cacheable = False
+    cache_enable = False
     query_class = CachingQuery
 
 
@@ -27,6 +28,11 @@ class CachingSQLAlchemy(SQLAlchemy):
         self.app = app
         self.regions = kwargs.pop('regions', None)
         self.key_prefix = kwargs.pop('key_prefix', None)
+
+        self.cache_invalidator_class = kwargs.pop(
+            'invalidator_class', CachingInvalidator)
+        self.cache_invalidator_sync = kwargs.pop(
+            'invalidator_sync', False)
 
         self.query_cls = query_callable(self.regions)
 
@@ -75,4 +81,13 @@ class CachingSQLAlchemy(SQLAlchemy):
                                 metaclass=_BoundDeclarativeMeta)
         base.query = _QueryProperty(self)
         return base
+
+    @property
+    def cache_invalidator(self):
+        ctx = stack.top
+        if ctx is not None:
+            if not hasattr(ctx, '_redica_invalidator'):
+                ctx._redica_invalidator = CachingInvalidator(
+                    self.cache_invalidator_sync)
+            return ctx._redica_invalidator
 
