@@ -10,3 +10,4 @@
 
 from .redis import ExtendRedisBackend
 from .core import CachingSQLAlchemy
+from .model import CachingMixin

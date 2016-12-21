@@ -1,28 +1,32 @@
 # -*- coding: utf-8 -*-
 import functools
 
-from flask import current_app
 from flask_sqlalchemy import BaseQuery
 from sqlalchemy.orm.interfaces import MapperOption
 from dogpile.cache.api import NO_VALUE
 
-from .utils import _prefixed_key_from_query, _key_from_query
+from .utils import _prefixed_key_from_query, _key_from_query, current_redica
 
 
 class CachingQuery(BaseQuery):
+
     def __init__(self, regions, *args, **kwargs):
-        redica_ext = current_app.extensions['sqlalchemy_redica']
-        self.cache_regions = regions or redica_ext.regions
+        self.cache_regions = regions
         super(CachingQuery, self).__init__(*args, **kwargs)
 
     def __iter__(self):
         if hasattr(self, '_cache_region'):
+            expiration_time = self._cache_region.expiration_time
             return self.get_value(
-                createfunc=lambda: list(super(CachingQuery, self).__iter__()))
+                createfunc=lambda: list(super(CachingQuery, self).__iter__()),
+                expiration_time=expiration_time
+            )
         else:
             return super(CachingQuery, self).__iter__()
 
     def _get_cache_plus_key(self):
+        if not self.cache_regions:
+            self.cache_regions = current_redica.regions
         dogpile_region = self.cache_regions[self._cache_region.region]
         if self._cache_region.cache_key:
             key = self._cache_region.cache_key
@@ -72,13 +76,18 @@ class FromCache(MapperOption):
 
     propagate_to_loaders = False
 
-    def __init__(self, region='default', cache_key=None, query_prefix=None):
+    def __init__(self, region='default', cache_key=None, query_prefix=None,
+                 cache_regions=None, expiration_time=None):
         self.region = region
         self.cache_key = cache_key
         self.query_prefix = query_prefix
+        self.cache_regions = cache_regions
+        self.expiration_time = expiration_time
 
     def process_query(self, query):
         query._cache_region = self
+        if self.cache_regions:
+            query.cache_regions = self.cache_regions
 
 
 class RelationshipCache(MapperOption):

@@ -2,13 +2,14 @@
 import unittest
 
 from flask import Flask
-from flask_sqlalchemy_redica import CachingSQLAlchemy
+
+from flask_sqlalchemy_redica import CachingSQLAlchemy, CachingMixin
 
 
 db = CachingSQLAlchemy()
 
 
-class DummyUser(db.Model):
+class DummyUser(db.Model, CachingMixin):
     cache_enable = True
 
     id = db.Column(db.Integer, primary_key=True)

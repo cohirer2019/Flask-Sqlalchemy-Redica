@@ -5,30 +5,30 @@ import itertools
 import functools
 from blinker import signal
 from dogpile.cache.api import NO_VALUE
-from flask import current_app
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import event, inspect
-from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import get_history
 from sqlalchemy.orm.base import PASSIVE_NO_INITIALIZE
-from werkzeug.local import LocalProxy
 
+from .utils import current_redica
 from .cache import FromCache
 
 
 class Cache(object):
-    def __init__(self, model, regions, label, exclude_columns=None):
+    def __init__(self, model, regions, label,
+                 columns=None, exclude_columns=None,
+                 invalidate_queries=None, invalidate_relationships=None,
+                 expiration_time=None):
         self.model = model
         self.regions = regions
         self.label = label
         self.pk = getattr(model, 'cache_pk', 'id')
         self.exclude_columns = set(exclude_columns) \
             if exclude_columns else set()
-        self.columns = None
-
-        if not regions:
-            redica_ext = current_app.extensions['sqlalchemy_redica']
-            self.regions = redica_ext.regions
+        self.columns = set(columns) if columns else set()
+        self.invalidate_queries = invalidate_queries
+        self.invalidate_relationships = invalidate_relationships
+        self.expiration_time = expiration_time
 
     def get(self, pk):
         return self.model.query.options(self.from_cache(pk=pk)).get(pk)
@@ -48,11 +48,15 @@ class Cache(object):
                 yield self.get(value)
                 return
 
-            if key not in self._columns():
+            if key not in self._columns:
                 raise TypeError('%s does not have an attribute %s' % self, key)
             query_kwargs[key] = value
 
         cache_key = self.cache_key(**kwargs)
+
+        if not self.regions:
+            self.regions = current_redica.regions
+
         pks = self.regions[self.label].get(cache_key)
 
         if pks is NO_VALUE:
@@ -77,12 +81,18 @@ class Cache(object):
                 yield obj[0]
 
     def flush(self, key):
+        if not self.regions:
+            return
         self.regions[self.label].delete(key)
 
     def keys(self, key_pattern):
+        if not self.regions:
+            return
         return self.regions[self.label].backend.keys(key_pattern)
 
     def flush_multi(self, key_pattern):
+        if not self.regions:
+            return
         if not key_pattern.endswith('*'):
             key_pattern += '*'
         backend = self.regions[self.label].backend
@@ -90,33 +100,41 @@ class Cache(object):
         if len(keys) > 0:
             backend.delete_multi(keys)
 
+    @property
     def _columns(self):
         if not self.columns:
-            self.columns = [
+            self.columns = set([
                 c.name for c in self.model.__table__.columns
-                if c.name != self.pk and c.name not in self.exclude_columns]
+                if c.name != self.pk and c.name not in self.exclude_columns])
 
         return self.columns
 
     def from_cache(self, cache_key=None, pk=None, prefix=None):
+        if not self.regions:
+            self.regions = current_redica.regions
+
         if pk:
             cache_key = self.cache_key(pk)
-        return FromCache(self.label, cache_key, query_prefix=prefix)
+        return FromCache(
+            self.label, cache_key, query_prefix=prefix,
+            cache_regions=self.regions, expiration_time=self.expiration_time)
 
     def cache_key(self, pk='all', **kwargs):
         q_filter = ''.join('{}={}'.format(k, v) for k, v in kwargs.items()) \
-            or self.pk
-        return "{}:{}:object:{}".format(self.model.__table__, pk, q_filter)
+                   or self.pk
+        return "{}:{}:object:{}".format(
+            self.model.__table__, pk, q_filter)
 
     def cache_relationship_key(self, pk, relation_name):
         return '{}:{}:relationship:{}'.format(
             self.model.__tablename__, pk, relation_name)
 
     def cache_query_key(self, pk, query_name):
-        return '{}:{}:query:{}'.format(self.model.__tablename__, pk, query_name)
+        return '{}:{}:query:{}'.format(
+            self.model.__tablename__, pk, query_name)
 
     def flush_filters(self, obj):
-        for column in self._columns():
+        for column in self._columns:
             added, _, deleted = get_history(
                 obj, column, passive=PASSIVE_NO_INITIALIZE)
             for value in itertools.chain(added or (), deleted or ()):
@@ -124,8 +142,17 @@ class Cache(object):
 
     def flush_caches(self, obj_pk):
         self.flush(self.cache_key(obj_pk))
-        self.flush_multi(self.cache_relationship_key(obj_pk, '*'))
-        self.flush_multi(self.cache_query_key(obj_pk, '*'))
+        if self.invalidate_relationships:
+            for r in self.invalidate_relationships:
+                self.flush_multi(self.cache_relationship_key(obj_pk, r))
+        else:
+            self.flush_multi(self.cache_relationship_key(obj_pk, '*'))
+
+        if self.invalidate_queries:
+            for q in self.invalidate_queries:
+                self.flush_multi(self.cache_query_key(obj_pk, q))
+        else:
+            self.flush_multi(self.cache_query_key(obj_pk, '*'))
 
     def flush_all(self, obj):
         self.flush_filters(obj)
@@ -136,38 +163,52 @@ class Cache(object):
             self.flush_caches(obj_pk)
 
 
-_flush_signal = signal('_flask_sqlalchemy_redica_flush')
+_flush_signal = signal('flask_sqlalchemy_redica_flush_signal')
 
 
-class CacheableMixin(object):
+class CachingMixin(object):
     cache_enable = True
     cache_label = 'default'
     cache_regions = None
     cache_expiration_time = 3600
+    cache_queries = ()
+    cache_relationships = ()
+    # only these columns will produce cache indices
     cache_columns = ()
     # these columns will not produce cache indices
     cache_exclude_columns = ()
 
     cache_invalidate = True
+    # only these columns will produce cache flush
     cache_invalidate_columns = ()
-    cache_invalidate_queries = ()
-    cache_invalidate_relationships = ()
     # these columns changes will not produce cache flush
-    cache_invalidate_exclude_columns = {'update_at', 'create_at'}
+    cache_invalidate_exclude_columns = ()
 
     cache_invalidate_notify = True
     cache_invalidate_notify_relationships = ()
 
     _initialized = False
-    _all_columns = set()
+    _all_columns = ()
 
     @declared_attr.cascading
     def cache(cls):
         if cls.cache_enable:
             return Cache(
                 cls, cls.cache_regions, cls.cache_label,
-                exclude_columns=cls.cache_exclude_columns
+                columns=cls.cache_columns,
+                exclude_columns=cls.cache_exclude_columns,
+                invalidate_relationships=cls.cache_relationships,
+                invalidate_queries=cls.cache_queries,
+                expiration_time=cls.cache_expiration_time
             )
+
+    @declared_attr.cascading
+    def use_cache(cls):
+        return hasattr(cls, 'cache') and getattr(cls, 'cache_enable')
+
+    @staticmethod
+    def invalidator():
+        return current_redica.cache_invalidator
 
     @classmethod
     def _flush_all(cls, target_id, target):
@@ -186,28 +227,6 @@ class CacheableMixin(object):
         return cls.cache.cache_query_key(pk, query_name)
 
     @classmethod
-    def on_invalidate_notify(cls, sender, **kw):
-        target = kw.get('target')
-        target_id = kw.get('target_id')
-        src = kw.get('src')
-        ev = kw.get('event')
-
-        cls._flush_all(target_id, target)
-
-        if src == 'on_model_changed' \
-                and ev == 'update' \
-                and not cls.has_changes(target):
-            # for self update, if no changes, then do not notify others
-            return
-
-        delay = True
-        if ev == 'delete' or src != 'on_model_changed':
-            # deletion need flush right away
-            delay = False
-
-        cls._notify_all(target, ev, delay=delay)
-
-    @classmethod
     def listen_mapper_events(cls, mapper, sender, callback):
         object_update_callback = functools.partial(
             callback, sender, 'update')
@@ -222,15 +241,16 @@ class CacheableMixin(object):
     @classmethod
     def on_model_changed(cls, *args):
         sender, ev, _, _, target = args
-        kwargs = dict(module=cls.__module__, model=sender,
-                      target=target, event=ev, src='on_model_changed')
+        kwargs = dict(module=cls.__module__, model=sender, target=target,
+                      target_id=target.id, event=ev, src='on_model_changed')
         _flush_signal.send(sender, **kwargs)
 
     @classmethod
     def init_invalidate_columns(cls, mapper):
         cls._all_columns = set(mapper.attrs.keys())
-        cls.cache_invalidate_columns = cls.cache_invalidate_columns or \
-            cls._all_columns - cls.cache_invalidate_exclude_columns
+        cls.cache_invalidate_columns = \
+            cls.cache_invalidate_columns or \
+            set(cls._all_columns) - set(cls.cache_invalidate_exclude_columns)
 
     @classmethod
     def has_changes(cls, target, use_all=False):
@@ -272,11 +292,33 @@ class CacheableMixin(object):
             for obj in cls.relation_changes(target, attr, r):
                 kwargs = dict(
                     module=attr.mapper.class_.__module__, model=sender,
-                    target=target, target_id=obj.id, event=ev, src='on_notify')
+                    target=obj, target_id=obj.id, event=ev, src='on_notify')
                 if delay:
-                    cache_invalidator.invalidate(**kwargs)
+                    cls.invalidator().invalidate(**kwargs)
                 else:
                     _flush_signal.send(sender, **kwargs)
+
+    @classmethod
+    def on_invalidate_notify(cls, sender, **kw):
+        target = kw.get('target')
+        target_id = kw.get('target_id')
+        src = kw.get('src')
+        ev = kw.get('event')
+
+        cls._flush_all(target_id, target)
+
+        if src == 'on_model_changed' \
+                and ev == 'update' \
+                and not cls.has_changes(target):
+            # for self update, if no changes, then do not notify others
+            return
+
+        delay = True
+        if ev == 'delete' or src != 'on_model_changed':
+            # deletion need flush right away
+            delay = False
+
+        cls._notify_all(target, ev, delay=delay)
 
     @classmethod
     def __declare_last__(cls):
@@ -306,45 +348,31 @@ class CacheableMixin(object):
         cls._initialized = True
 
 
-def do_flush(invalidator):
-    session = current_app.extensions['sqlalchemy_redica'].session
-    invalidator.invalidate_nofity(session)
-
-
 class CachingInvalidator:
     def __init__(self, async=False, callback=None):
         self.items = []
         self.async = async
-        self.callback = callback or do_flush
+        self.callback = callback or self.invalidate_nofity
 
     def invalidate(self, **kwargs):
         if self.async:
             kwargs.pop('target', None)
         self.items.append(kwargs)
 
-    def invalidate_nofity(self, session):
-        for info in self.items:
+    @staticmethod
+    def invalidate_nofity(invalidator):
+        session = current_redica.create_scoped_session()
+        for info in invalidator.items:
             info['src'] = 'on_flush'
             module = info.get('module')
             model = info.get('model')
-            target = info.get('target')
             target_id = info.get('target_id')
-            if not target and target_id:
-                model_cls = getattr(importlib.import_module(module), model)
-                info['target'] = session.query(model_cls).get(target_id)
+            model_cls = getattr(importlib.import_module(module), model)
+            info['target'] = session.query(model_cls).get(target_id)
             _flush_signal.send(model, **info)
+        session.close()
 
     def flush(self):
         self.callback(self)
+        self.items = []
 
-
-def _get_cache_invalidator():
-    redica_ext = current_app.extensions['sqlalchemy_redica']
-    return redica_ext.cache_invalidator
-
-cache_invalidator = LocalProxy(lambda: _get_cache_invalidator())
-
-
-@event.listens_for(Session, 'after_commit')
-def cache_after_commit(session):
-    cache_invalidator.flush()
