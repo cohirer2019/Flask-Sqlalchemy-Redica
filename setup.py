@@ -9,7 +9,7 @@ from setuptools import setup
 
 setup(
     name='Flask-SQLAlchemy-Redica',
-    version='3.0',
+    version='0.1',
     url='http://dev.smart4e.com/oceanio/flask-sqlalchemy-redica',
     license='BSD',
     author='Alan Zhang',
