@@ -216,10 +216,6 @@ class CachingMixin(object):
     #: which relation objects will be notified
     cache_invalidate_notify_relationships = ()
 
-    # private properties
-    _initialized = False
-    _all_columns = ()
-
     @declared_attr.cascading
     def cache(cls):
         """cache object implementation, will be used like::

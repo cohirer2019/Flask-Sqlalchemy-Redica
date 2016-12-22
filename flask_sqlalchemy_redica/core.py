@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import functools
-import importlib
 
 from dogpile.cache.region import make_region
 from sqlalchemy import event
@@ -21,6 +20,14 @@ from .model import CachingInvalidator
 
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
+
+
+class CachingMeta(_BoundDeclarativeMeta):
+    def __init__(self, *args):
+        super(CachingMeta, self).__init__(*args)
+        # private properties
+        self._initialized = False
+        self._all_columns = ()
 
 
 class CachingModel(Model):
@@ -86,7 +93,7 @@ class CachingSQLAlchemy(SQLAlchemy):
         """Creates the declarative base."""
         base = declarative_base(cls=CachingModel, name='Model',
                                 metadata=metadata,
-                                metaclass=_BoundDeclarativeMeta)
+                                metaclass=CachingMeta)
         base.query = _QueryProperty(self)
         return base
 
