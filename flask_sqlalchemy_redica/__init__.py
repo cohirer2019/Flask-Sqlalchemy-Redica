@@ -10,4 +10,4 @@
 
 from .redis import ExtendRedisBackend
 from .core import CachingSQLAlchemy
-from .model import CachingMixin
+from .model import CachingMixin, default_caching_invalidate

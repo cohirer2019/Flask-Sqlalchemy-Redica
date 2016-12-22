@@ -11,18 +11,14 @@ try:
 except ImportError:
     from flask import _request_ctx_stack as stack
 
-from flask_sqlalchemy import SQLAlchemy, Model, _QueryProperty
+from flask_sqlalchemy import SQLAlchemy, _QueryProperty
 
 from .utils import _md5_key_mangler
-from .cache import CachingQuery, query_callable
-from .model import CachingInvalidator, CachingMeta
+from .cache import query_callable
+from .model import CachingInvalidator, CachingMeta, CeleryCachingInvalidator, \
+    CachingModel
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
-
-
-class CachingModel(Model):
-    cache_regions = None
-    query_class = CachingQuery
 
 
 class CachingSQLAlchemy(SQLAlchemy):
@@ -32,7 +28,7 @@ class CachingSQLAlchemy(SQLAlchemy):
         self.prefix = kwargs.pop('prefix', DEFAULT_REDICA_KEY_PREFIX)
 
         self.cache_invalidator_class = kwargs.pop(
-            'invalidator_class', CachingInvalidator)
+            'invalidator_class', None)
         self.cache_invalidator_callback = kwargs.pop(
             'invalidator_callback', None)
 
@@ -64,6 +60,13 @@ class CachingSQLAlchemy(SQLAlchemy):
             expiration_time = app.config.setdefault(
                 'REDICA_DEFAULT_EXPIRE', 3600)
             redica_cache_url = app.config.get('REDICA_CACHE_URL')
+            if not self.cache_invalidator_class:
+                redica_invalidator_type = app.config.get('REDICA_INVALIDATOR_TYPE')
+                if redica_invalidator_type == 'celery':
+                    self.cache_invalidator_class = CeleryCachingInvalidator
+                else:
+                    self.cache_invalidator_class = CachingInvalidator
+
             key_mangler = functools.partial(_md5_key_mangler, self.prefix)
 
             self.regions = dict(
@@ -77,7 +80,7 @@ class CachingSQLAlchemy(SQLAlchemy):
                 })
             )
 
-            CachingModel.cache_regions = self.regions
+            self.Model.cache_regions = self.regions
 
     def make_declarative_base(self, metadata=None):
         """Creates the declarative base."""
