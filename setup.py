@@ -22,7 +22,8 @@ setup(
     zip_safe=False,
     platforms='any',
     install_requires=[
-        'Flask-SQLAlchemy>=2.0,<=3.0'
+        'Flask-SQLAlchemy>=2.0,<=3.0',
+        'dogpile.cache>=0.6.2'
     ],
     test_suite='tests',
     classifiers=[
