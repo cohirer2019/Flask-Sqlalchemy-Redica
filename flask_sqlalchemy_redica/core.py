@@ -11,23 +11,13 @@ try:
 except ImportError:
     from flask import _request_ctx_stack as stack
 
-from flask_sqlalchemy import SQLAlchemy, Model, _BoundDeclarativeMeta, \
-    _QueryProperty
+from flask_sqlalchemy import SQLAlchemy, Model, _QueryProperty
 
 from .utils import _md5_key_mangler
 from .cache import CachingQuery, query_callable
-from .model import CachingInvalidator
-
+from .model import CachingInvalidator, CachingMeta
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
-
-
-class CachingMeta(_BoundDeclarativeMeta):
-    def __init__(self, *args):
-        super(CachingMeta, self).__init__(*args)
-        # private properties
-        self._initialized = False
-        self._all_columns = ()
 
 
 class CachingModel(Model):

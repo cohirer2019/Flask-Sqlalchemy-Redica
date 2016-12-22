@@ -5,6 +5,7 @@ import itertools
 import functools
 from blinker import signal
 from dogpile.cache.api import NO_VALUE
+from flask_sqlalchemy import _BoundDeclarativeMeta
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import event, inspect
 from sqlalchemy.orm.attributes import get_history
@@ -169,52 +170,60 @@ class Cache(object):
 _flush_signal = signal('flask_sqlalchemy_redica_flush_signal')
 
 
+class CachingMeta(_BoundDeclarativeMeta):
+    def __init__(self, *args):
+        super(CachingMeta, self).__init__(*args)
+        # private properties
+        self._initialized = False
+        self._all_columns = ()
+
+        #: enable cache
+        self.cache_enable = True
+
+        #: specify which dogpile region to use
+        self.cache_label = 'default'
+
+        #: specify user custom dogpile regions
+        #: if not specifed, use the default regions created by redica
+        self.cache_regions = None
+
+        #: cache expiration time, default is 1 hour
+        self.cache_expiration_time = 3600
+
+        #: if not specified, cache will expire all queries of this object
+        self.cache_queries = ()
+
+        #: if not specified, cache will expire all relationships of this object
+        self.cache_relationships = ()
+
+        #: only these columns will produce cache indices
+        self.cache_columns = ()
+
+        #: these columns will not produce cache indices
+        self.cache_exclude_columns = ()
+
+        #: enable cache invalidation
+        #: if disabled, cache will only expired until timeout
+        #: if enabled, when object changes, cache will invalidate automatically
+        self.cache_invalidate = True
+
+        #: only these columns will produce cache invalidate
+        self.cache_invalidate_columns = ()
+
+        #: these columns changes will not produce cache invalidate
+        self.cache_invalidate_exclude_columns = ()
+
+        #: enable cache invalidate notification
+        #: some mapper class can be used only for notification
+        #: itself cannot cache and invalidate
+        self.cache_invalidate_notify = False
+
+        #: which relation objects will be notified
+        self.cache_invalidate_notify_relationships = ()
+
+
 class CachingMixin(object):
     """mixin for caching models."""
-
-    #: enable cache
-    cache_enable = True
-
-    #: specify which dogpile region to use
-    cache_label = 'default'
-
-    #: specify user custom dogpile regions
-    #: if not specifed, use the default regions created by redica
-    cache_regions = None
-
-    #: cache expiration time, default is 1 hour
-    cache_expiration_time = 3600
-
-    #: if not specified, cache will expire all queries of this object
-    cache_queries = ()
-
-    #: if not specified, cache will expire all relationships of this object
-    cache_relationships = ()
-
-    #: only these columns will produce cache indices
-    cache_columns = ()
-
-    #: these columns will not produce cache indices
-    cache_exclude_columns = ()
-
-    #: enable cache invalidation
-    #: if disabled, cache will only expired until timeout
-    #: if enabled, when object changes, cache will invalidate automatically
-    cache_invalidate = True
-
-    #: only these columns will produce cache invalidate
-    cache_invalidate_columns = ()
-
-    #: these columns changes will not produce cache invalidate
-    cache_invalidate_exclude_columns = ()
-
-    #: enable cache invalidate notification
-    #: some mapper class can be used only for notification
-    #: itself cannot cache and invalidate
-    cache_invalidate_notify = False
-
-    #: which relation objects will be notified
-    cache_invalidate_notify_relationships = ()
 
     @declared_attr.cascading
     def cache(cls):
