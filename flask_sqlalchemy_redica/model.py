@@ -254,7 +254,8 @@ class CachingMixin(CachingConfigure):
 
     @staticmethod
     def invalidator():
-        return current_redica.cache_invalidator
+        if current_redica:
+            return current_redica.cache_invalidator
 
     @classmethod
     def __declare_last__(cls):
@@ -387,7 +388,9 @@ class CachingMixin(CachingConfigure):
                     module=attr.mapper.class_.__module__, model=sender,
                     target=obj, target_id=obj.id, event=ev, src='on_notify')
                 if delay:
-                    cls.invalidator().invalidate(**kwargs)
+                    invalidator = cls.invalidator()
+                    if invalidator:
+                        invalidator.invalidate(**kwargs)
                 else:
                     _flush_signal.send(sender, **kwargs)
 
@@ -410,16 +413,17 @@ class CachingInvalidator(object):
 
     @staticmethod
     def do_flush(items):
-        session = current_redica.create_scoped_session()
-        for info in items:
-            info['src'] = 'on_flush'
-            module = info.get('module')
-            model = info.get('model')
-            target_id = info.get('target_id')
-            model_cls = getattr(importlib.import_module(module), model)
-            info['target'] = session.query(model_cls).get(target_id)
-            _flush_signal.send(model, **info)
-        session.close()
+        if current_redica:
+            session = current_redica.create_scoped_session()
+            for info in items:
+                info['src'] = 'on_flush'
+                module = info.get('module')
+                model = info.get('model')
+                target_id = info.get('target_id')
+                model_cls = getattr(importlib.import_module(module), model)
+                info['target'] = session.query(model_cls).get(target_id)
+                _flush_signal.send(model, **info)
+            session.close()
 
     def flush(self):
         items = list(self.items)
