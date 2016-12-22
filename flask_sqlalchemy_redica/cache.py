@@ -5,13 +5,14 @@ from flask_sqlalchemy import BaseQuery
 from sqlalchemy.orm.interfaces import MapperOption
 from dogpile.cache.api import NO_VALUE
 
-from .utils import _prefixed_key_from_query, _key_from_query, current_redica
+from .utils import _prefixed_key_from_query, _key_from_query
 
 
 class CachingQuery(BaseQuery):
+    default_regions = None
 
-    def __init__(self, regions, *args, **kwargs):
-        self.cache_regions = regions
+    def __init__(self, *args, **kwargs):
+        self.cache_regions = None
         super(CachingQuery, self).__init__(*args, **kwargs)
 
     def __iter__(self):
@@ -24,10 +25,12 @@ class CachingQuery(BaseQuery):
         else:
             return super(CachingQuery, self).__iter__()
 
+    @property
+    def regions(self):
+        return self.cache_regions or self.default_regions
+
     def _get_cache_plus_key(self):
-        if not self.cache_regions:
-            self.cache_regions = current_redica.regions
-        dogpile_region = self.cache_regions[self._cache_region.region]
+        dogpile_region = self.regions[self._cache_region.region]
         if self._cache_region.cache_key:
             key = self._cache_region.cache_key
         elif self._cache_region.query_prefix:

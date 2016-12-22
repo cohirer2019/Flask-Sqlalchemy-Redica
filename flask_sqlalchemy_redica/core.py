@@ -11,12 +11,12 @@ try:
 except ImportError:
     from flask import _request_ctx_stack as stack
 
-from flask_sqlalchemy import SQLAlchemy, _QueryProperty
+from flask_sqlalchemy import SQLAlchemy, _QueryProperty, Model
 
 from .utils import _md5_key_mangler
-from .cache import query_callable
+from .cache import CachingQuery
 from .model import CachingInvalidator, CachingMeta, CeleryCachingInvalidator, \
-    CachingModel
+    CachingMixin, Cache
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
 
@@ -32,16 +32,13 @@ class CachingSQLAlchemy(SQLAlchemy):
         self.cache_invalidator_callback = kwargs.pop(
             'invalidator_callback', None)
 
-        self.query_cls = query_callable(self.regions)
-
         if 'query_class' in kwargs:
-            self.query_cls = kwargs.setdefault('query_class', self.query_cls)
+            self.query_cls = kwargs.setdefault('query_class', CachingQuery)
         else:
             self.query_cls = kwargs.setdefault(
-                'session_options', {}).setdefault('query_cls', self.query_cls)
+                'session_options', {}).setdefault('query_cls', CachingQuery)
 
-        CachingModel.query_class = self.query_cls
-        CachingModel.cache_regions = self.regions
+        Model.query_class = CachingQuery
 
         super(CachingSQLAlchemy, self).__init__(app, **kwargs)
 
@@ -80,11 +77,12 @@ class CachingSQLAlchemy(SQLAlchemy):
                 })
             )
 
-            self.Model.cache_regions = self.regions
+            Cache.default_regions = self.regions
+            CachingQuery.default_regions = self.regions
 
     def make_declarative_base(self, metadata=None):
         """Creates the declarative base."""
-        base = declarative_base(cls=CachingModel, name='Model',
+        base = declarative_base(cls=Model, name='Model',
                                 metadata=metadata,
                                 metaclass=CachingMeta)
         base.query = _QueryProperty(self)

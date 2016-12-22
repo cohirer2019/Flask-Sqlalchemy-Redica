@@ -12,16 +12,18 @@ from sqlalchemy.orm.attributes import get_history
 from sqlalchemy.orm.base import PASSIVE_NO_INITIALIZE
 
 from .utils import current_redica
-from .cache import FromCache, CachingQuery
+from .cache import FromCache
 
 
 class Cache(object):
+    default_regions = None
+
     def __init__(self, model, regions, label,
                  columns=None, exclude_columns=None,
                  invalidate_queries=None, invalidate_relationships=None,
                  expiration_time=None):
         self.model = model
-        self.regions = regions
+        self.cache_regions = regions
         self.label = label
         self.pk = getattr(model, 'cache_pk', 'id')
         self.exclude_columns = set(exclude_columns) \
@@ -30,6 +32,10 @@ class Cache(object):
         self.invalidate_queries = invalidate_queries
         self.invalidate_relationships = invalidate_relationships
         self.expiration_time = expiration_time
+
+    @property
+    def regions(self):
+        return self.cache_regions or self.default_regions
 
     def get(self, pk):
         return self.model.query.options(self.from_cache(pk=pk)).get(pk)
@@ -55,9 +61,6 @@ class Cache(object):
 
         cache_key = self.cache_key(**kwargs)
 
-        if not self.regions:
-            self.regions = current_redica.regions
-
         pks = self.regions[self.label].get(cache_key)
 
         if pks is NO_VALUE:
@@ -82,18 +85,12 @@ class Cache(object):
                 yield obj[0]
 
     def flush(self, key):
-        if not self.regions:
-            return
         self.regions[self.label].delete(key)
 
     def keys(self, key_pattern):
-        if not self.regions:
-            return
         return self.regions[self.label].backend.keys(key_pattern)
 
     def flush_multi(self, key_pattern):
-        if not self.regions:
-            return
         if not key_pattern.endswith('*'):
             key_pattern += '*'
         backend = self.regions[self.label].backend
@@ -111,9 +108,6 @@ class Cache(object):
         return self.columns
 
     def from_cache(self, cache_key=None, pk=None, prefix=None):
-        if not self.regions:
-            self.regions = current_redica.regions
-
         if pk:
             cache_key = self.cache_key(pk)
         return FromCache(
@@ -170,43 +164,16 @@ class Cache(object):
 _flush_signal = signal('flask_sqlalchemy_redica_flush_signal')
 
 
-class CachingModel(Model):
-    cache_regions = None
-    query_class = CachingQuery
-
-
-class CachingMeta(_BoundDeclarativeMeta):
-    def __init__(self, *args):
-        name, bases, dct = args
-        super(CachingMeta, self).__init__(*args)
-
-        caching_attributes = dict(
-            [(k, v) for k, v in CachingConfigure.__dict__.items()
-             if not k.startswith('__')])
-
-        for k, v in caching_attributes.items():
-            if k not in dct:
-                setattr(self, k, v)
-
-        base = bases[0]
-        if issubclass(base, CachingModel):
-            print name, base.cache_regions
-
-
 class CachingConfigure(object):
-    # private properties
-    _initialized = False
-    _all_columns = ()
-
     #: enable cache
     cache_enable = True
-
-    #: specify which dogpile region to use
-    cache_label = 'default'
 
     #: specify user custom dogpile regions
     #: if not specifed, use the default regions created by redica
     cache_regions = None
+
+    #: specify which dogpile region to use
+    cache_label = 'default'
 
     #: cache expiration time, default is 1 hour
     cache_expiration_time = 3600
@@ -241,6 +208,10 @@ class CachingConfigure(object):
 
     #: which relation objects will be notified
     cache_invalidate_notify_relationships = ()
+
+    # private properties
+    _initialized = False
+    _all_columns = ()
 
 
 class CachingMixin(CachingConfigure):
@@ -289,6 +260,9 @@ class CachingMixin(CachingConfigure):
     def __declare_last__(cls):
         if cls._initialized:
             return
+
+        if cls.cache_enable is False:
+            cls.cache_invalidate = False
 
         if len(cls.cache_invalidate_notify_relationships) > 0:
             cls.cache_invalidate_notify = True
@@ -352,7 +326,8 @@ class CachingMixin(CachingConfigure):
         src = kw.get('src')
         ev = kw.get('event')
 
-        cls._flush_all(target_id, target)
+        if cls.cache_invalidate:
+            cls._flush_all(target_id, target)
 
         if not cls.cache_invalidate_notify:
             return
@@ -386,11 +361,11 @@ class CachingMixin(CachingConfigure):
                 and history.has_changes():
             # backref can update itself
             # no need to broadcast signals
-            dataset = history.unchanged or ()
+            change_set = history.unchanged or ()
         else:
-            dataset = history.sum()
+            change_set = history.sum()
 
-        for obj in dataset:
+        for obj in change_set:
             if not obj or obj.id is None:
                 # for new obj, it will flush by itself,
                 # no need to broadcast signal
@@ -428,13 +403,13 @@ class CachingMixin(CachingConfigure):
 class CachingInvalidator(object):
     def __init__(self, callback=None):
         self.items = []
-        self.callback = callback or self._flush
+        self.callback = callback or self.do_flush
 
     def invalidate(self, **kwargs):
         self.items.append(kwargs)
 
     @staticmethod
-    def _flush(items):
+    def do_flush(items):
         session = current_redica.create_scoped_session()
         for info in items:
             info['src'] = 'on_flush'
@@ -464,4 +439,20 @@ class CeleryCachingInvalidator(CachingInvalidator):
 
 
 def default_caching_invalidate(items):
-    CachingInvalidator._flush(items)
+    CachingInvalidator.do_flush(items)
+
+caching_attributes = [
+    (k, v) for k, v in CachingConfigure.__dict__.items()
+    if not k.startswith('__')]
+
+
+class CachingMeta(_BoundDeclarativeMeta):
+    def __init__(cls, *args):
+        name, bases, dct = args
+        super(CachingMeta, cls).__init__(*args)
+
+        if any(itertools.imap(
+                lambda x: x != Model and issubclass(x, Model), bases)):
+            for k, v in caching_attributes:
+                if k not in dct:
+                    setattr(cls, k, v)
