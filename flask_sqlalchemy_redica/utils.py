@@ -8,7 +8,7 @@ from werkzeug.local import LocalProxy
 def _md5_key_mangler(prefix, key):
     if key.startswith('SELECT '):
         key = hashlib.md5(key.encode('utf-8')).hexdigest()
-    return prefix + key
+    return ':'.join([prefix, key])
 
 
 def _key_from_query(query):

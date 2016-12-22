@@ -130,8 +130,11 @@ class Cache(object):
             self.model.__tablename__, pk, relation_name)
 
     def cache_query_key(self, pk, query_name):
-        return '{}:{}:query:{}'.format(
-            self.model.__tablename__, pk, query_name)
+        if query_name:
+            return '{}:{}:query:{}'.format(
+                self.model.__tablename__, pk, query_name)
+        else:
+            return '{}:{}:query'.format(self.model.__tablename__, pk)
 
     def flush_filters(self, obj):
         for column in self._columns:
@@ -167,31 +170,62 @@ _flush_signal = signal('flask_sqlalchemy_redica_flush_signal')
 
 
 class CachingMixin(object):
+    """mixin for caching models."""
+
+    #: enable cache
     cache_enable = True
+
+    #: specify which dogpile region to use
     cache_label = 'default'
+
+    #: specify user custom dogpile regions
+    #: if not specifed, use the default regions created by redica
     cache_regions = None
+
+    #: cache expiration time, default is 1 hour
     cache_expiration_time = 3600
+
+    #: if not specified, cache will expire all queries of this object
     cache_queries = ()
+
+    #: if not specified, cache will expire all relationships of this object
     cache_relationships = ()
-    # only these columns will produce cache indices
+
+    #: only these columns will produce cache indices
     cache_columns = ()
-    # these columns will not produce cache indices
+
+    #: these columns will not produce cache indices
     cache_exclude_columns = ()
 
+    #: enable cache invalidation
+    #: if disabled, cache will only expired until timeout
+    #: if enabled, when object changes, cache will invalidate automatically
     cache_invalidate = True
-    # only these columns will produce cache flush
+
+    #: only these columns will produce cache invalidate
     cache_invalidate_columns = ()
-    # these columns changes will not produce cache flush
+
+    #: these columns changes will not produce cache invalidate
     cache_invalidate_exclude_columns = ()
 
-    cache_invalidate_notify = True
+    #: enable cache invalidate notification
+    #: some mapper class can be used only for notification
+    #: itself cannot cache and invalidate
+    cache_invalidate_notify = False
+
+    #: which relation objects will be notified
     cache_invalidate_notify_relationships = ()
 
+    # private properties
     _initialized = False
     _all_columns = ()
 
     @declared_attr.cascading
     def cache(cls):
+        """cache object implementation, will be used like::
+
+                obj = SomeModel.cache.get(id)
+        """
         if cls.cache_enable:
             return Cache(
                 cls, cls.cache_regions, cls.cache_label,
@@ -204,19 +238,14 @@ class CachingMixin(object):
 
     @declared_attr.cascading
     def use_cache(cls):
+        """Helpers for return if this object use cache
+        """
         return hasattr(cls, 'cache') and getattr(cls, 'cache_enable')
 
-    @staticmethod
-    def invalidator():
-        return current_redica.cache_invalidator
-
     @classmethod
-    def _flush_all(cls, target_id, target):
-        if cls.cache_enable and cls.cache_invalidate:
-            if target:
-                cls.cache.flush_all(target)
-            elif target_id:
-                cls.cache.flush_caches(target_id)
+    def from_cache(cls, pk='all'):
+        query_prefix = cls.query_cache_key(pk, '')
+        return cls.cache.from_cache(prefix=query_prefix)
 
     @classmethod
     def relationship_cache_key(cls, pk, relation_name):
@@ -225,6 +254,51 @@ class CachingMixin(object):
     @classmethod
     def query_cache_key(cls, pk, query_name):
         return cls.cache.cache_query_key(pk, query_name)
+
+    @staticmethod
+    def invalidator():
+        return current_redica.cache_invalidator
+
+    @classmethod
+    def __declare_last__(cls):
+        if cls._initialized:
+            return
+
+        if len(cls.cache_invalidate_notify_relationships) > 0:
+            cls.cache_invalidate_notify = True
+
+        if cls.cache_invalidate or cls.cache_invalidate_notify:
+            cls.configure_caching()
+
+        cls._initialized = True
+
+    @classmethod
+    def configure_caching(cls):
+        mapper = inspect(cls).mapper
+        sender = mapper.class_.__name__
+        cls.listen_mapper_events(mapper, sender, cls.on_model_change)
+        _flush_signal.connect(
+            cls.on_model_invalidate, sender=sender, weak=False)
+
+        base_mapper = inspect(cls).mapper.base_mapper
+        if base_mapper != mapper:
+            sender = base_mapper.class_.__name__
+
+            if cls.cache_invalidate or cls.cache_invalidate_notify:
+                cls.listen_mapper_events(base_mapper, sender,
+                                         cls.on_model_change)
+
+            _flush_signal.connect(
+                cls.on_model_invalidate, sender=sender, weak=False)
+
+        cls.init_invalidate_columns(mapper)
+
+    @classmethod
+    def init_invalidate_columns(cls, mapper):
+        cls._all_columns = set(mapper.attrs.keys())
+        cls.cache_invalidate_columns = \
+            cls.cache_invalidate_columns or \
+            set(cls._all_columns) - set(cls.cache_invalidate_exclude_columns)
 
     @classmethod
     def listen_mapper_events(cls, mapper, sender, callback):
@@ -239,18 +313,36 @@ class CachingMixin(object):
         event.listen(mapper, 'after_insert', object_insert_callback)
 
     @classmethod
-    def on_model_changed(cls, *args):
+    def on_model_change(cls, *args):
         sender, ev, _, _, target = args
         kwargs = dict(module=cls.__module__, model=sender, target=target,
-                      target_id=target.id, event=ev, src='on_model_changed')
+                      target_id=target.id, event=ev, src='on_model_change')
         _flush_signal.send(sender, **kwargs)
 
     @classmethod
-    def init_invalidate_columns(cls, mapper):
-        cls._all_columns = set(mapper.attrs.keys())
-        cls.cache_invalidate_columns = \
-            cls.cache_invalidate_columns or \
-            set(cls._all_columns) - set(cls.cache_invalidate_exclude_columns)
+    def on_model_invalidate(cls, sender, **kw):
+        target = kw.get('target')
+        target_id = kw.get('target_id')
+        src = kw.get('src')
+        ev = kw.get('event')
+
+        cls._flush_all(target_id, target)
+
+        if not cls.cache_invalidate_notify:
+            return
+
+        if src == 'on_model_change' \
+                and ev == 'update' \
+                and not cls.has_changes(target):
+            # for self update, if no changes, then do not notify others
+            return
+
+        delay = True
+        if ev == 'delete' or src != 'on_model_change':
+            # deletion need flush right away
+            delay = False
+
+        cls._notify_all(target, ev, delay=delay)
 
     @classmethod
     def has_changes(cls, target, use_all=False):
@@ -299,70 +391,26 @@ class CachingMixin(object):
                     _flush_signal.send(sender, **kwargs)
 
     @classmethod
-    def on_invalidate_notify(cls, sender, **kw):
-        target = kw.get('target')
-        target_id = kw.get('target_id')
-        src = kw.get('src')
-        ev = kw.get('event')
-
-        cls._flush_all(target_id, target)
-
-        if src == 'on_model_changed' \
-                and ev == 'update' \
-                and not cls.has_changes(target):
-            # for self update, if no changes, then do not notify others
-            return
-
-        delay = True
-        if ev == 'delete' or src != 'on_model_changed':
-            # deletion need flush right away
-            delay = False
-
-        cls._notify_all(target, ev, delay=delay)
-
-    @classmethod
-    def __declare_last__(cls):
-        if cls._initialized:
-            return
-
-        if not cls.cache_enable and \
-                not cls.cache_invalidate and \
-                not cls.cache_invalidate_notify:
-            return
-
-        mapper = inspect(cls).mapper
-        sender = mapper.class_.__name__
-        cls.listen_mapper_events(mapper, sender, cls.on_model_changed)
-        _flush_signal.connect(
-            cls.on_invalidate_notify, sender=sender, weak=False)
-
-        base_mapper = inspect(cls).mapper.base_mapper
-        if base_mapper != mapper:
-            sender = base_mapper.class_.__name__
-            cls.listen_mapper_events(base_mapper, sender,
-                                     cls.on_model_changed)
-            _flush_signal.connect(
-                cls.on_invalidate_notify, sender=sender, weak=False)
-
-        cls.init_invalidate_columns(mapper)
-        cls._initialized = True
+    def _flush_all(cls, target_id, target):
+        if cls.cache_enable and cls.cache_invalidate:
+            if target:
+                cls.cache.flush_all(target)
+            elif target_id:
+                cls.cache.flush_caches(target_id)
 
 
-class CachingInvalidator:
-    def __init__(self, async=False, callback=None):
+class CachingInvalidator(object):
+    def __init__(self, callback=None):
         self.items = []
-        self.async = async
-        self.callback = callback or self.invalidate_nofity
+        self.callback = callback or self._flush
 
     def invalidate(self, **kwargs):
-        if self.async:
-            kwargs.pop('target', None)
         self.items.append(kwargs)
 
     @staticmethod
-    def invalidate_nofity(invalidator):
+    def _flush(items):
         session = current_redica.create_scoped_session()
-        for info in invalidator.items:
+        for info in items:
             info['src'] = 'on_flush'
             module = info.get('module')
             model = info.get('model')
@@ -373,6 +421,17 @@ class CachingInvalidator:
         session.close()
 
     def flush(self):
-        self.callback(self)
+        items = list(self.items)
         self.items = []
+        self.callback(items)
 
+
+class CeleryCachingInvalidator(CachingInvalidator):
+    def invalidate(self, **kwargs):
+        kwargs.pop('target', None)
+        super(CeleryCachingInvalidator, self).invalidate(**kwargs)
+
+    def flush(self):
+        items = list(self.items)
+        self.items = []
+        self.callback.delay(items)

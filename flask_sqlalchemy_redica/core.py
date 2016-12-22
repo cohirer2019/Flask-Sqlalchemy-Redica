@@ -20,6 +20,9 @@ from .cache import CachingQuery, query_callable
 from .model import CachingInvalidator
 
 
+DEFAULT_REDICA_KEY_PREFIX = 'redica'
+
+
 class CachingModel(Model):
     cache_regions = None
     query_class = CachingQuery
@@ -29,12 +32,10 @@ class CachingSQLAlchemy(SQLAlchemy):
     def __init__(self, app=None, **kwargs):
         self.app = app
         self.regions = kwargs.pop('regions', None)
-        self.prefix = kwargs.pop('prefix', 'redica:')
+        self.prefix = kwargs.pop('prefix', DEFAULT_REDICA_KEY_PREFIX)
 
         self.cache_invalidator_class = kwargs.pop(
             'invalidator_class', CachingInvalidator)
-        self.cache_invalidator_async = kwargs.pop(
-            'invalidator_async', False)
         self.cache_invalidator_callback = kwargs.pop(
             'invalidator_callback', None)
 
@@ -66,8 +67,6 @@ class CachingSQLAlchemy(SQLAlchemy):
             expiration_time = app.config.setdefault(
                 'REDICA_DEFAULT_EXPIRE', 3600)
             redica_cache_url = app.config.get('REDICA_CACHE_URL')
-            if not self.prefix.endswith(':'):
-                self.prefix += ':'
             key_mangler = functools.partial(_md5_key_mangler, self.prefix)
 
             self.regions = dict(
@@ -97,7 +96,6 @@ class CachingSQLAlchemy(SQLAlchemy):
         if ctx is not None:
             if not hasattr(ctx, 'redica_invalidator'):
                 ctx.redica_invalidator = self.cache_invalidator_class(
-                    self.cache_invalidator_async,
                     self.cache_invalidator_callback)
             return ctx.redica_invalidator
 
