@@ -69,9 +69,10 @@ class CachingSQLAlchemy(SQLAlchemy):
             self.regions = dict(
                 default=make_region().configure(**{
                     'backend': 'extended_redis_backend',
+                    'expiration_time': expiration_time,
                     'arguments': {
                         'url': redica_cache_url,
-                        'redis_expiration_time': expiration_time,
+                        'redis_expiration_time': expiration_time + 30,
                         'key_mangler': key_mangler
                     }
                 })
