@@ -132,11 +132,15 @@ class Cache(object):
             return '{}:{}:query'.format(self.model.__tablename__, pk)
 
     def flush_filters(self, obj):
-        for column in self._columns:
-            added, _, deleted = get_history(
-                obj, column, passive=PASSIVE_NO_INITIALIZE)
-            for value in itertools.chain(added or (), deleted or ()):
-                self.flush(self.cache_key(**{column: value}))
+        keys = self._filter_keys(obj)
+        keys.append(self.cache_key())
+
+        obj_pk = getattr(obj, self.pk)
+        if obj_pk:
+            keys.append(self.cache_key(obj_pk))
+
+        if len(keys) > 0:
+            self.regions[self.label].delete_multi(keys)
 
     def _filter_keys(self, obj):
         keys = []
@@ -148,18 +152,20 @@ class Cache(object):
         return keys
 
     def flush_caches(self, obj_pk):
-        self.flush(self.cache_key(obj_pk))
-        if self.invalidate_relationships:
-            for r in self.invalidate_relationships:
-                self.flush_multi(self.cache_relationship_key(obj_pk, r))
-        else:
-            self.flush_multi(self.cache_relationship_key(obj_pk, '*'))
+        patterns = self._pattern_keys(obj_pk)
 
-        if self.invalidate_queries:
-            for q in self.invalidate_queries:
-                self.flush_multi(self.cache_query_key(obj_pk, q))
-        else:
-            self.flush_multi(self.cache_query_key(obj_pk, '*'))
+        backend = self.regions[self.label].backend
+        ppl = backend.pipeline()
+        for p in itertools.imap(lambda k: backend.key_mangler(k), patterns):
+            ppl.keys(p)
+
+        keys = []
+        for rs in ppl.execute():
+            if not rs:
+                continue
+            keys.extend(rs)
+        if len(keys) > 0:
+            backend.delete_multi(keys)
 
     def _pattern_keys(self, obj_pk):
         keys = []
@@ -179,30 +185,11 @@ class Cache(object):
         return keys
 
     def flush_all(self, obj):
-        patterns = []
-        keys = self._filter_keys(obj)
-        keys.append(self.cache_key())
+        self.flush_filters(obj)
 
         obj_pk = getattr(obj, self.pk)
         if obj_pk:
-            keys.append(self.cache_key(obj_pk))
-            patterns = self._pattern_keys(obj_pk)
-
-        if len(keys) > 0:
-            self.regions[self.label].delete_multi(keys)
-
-        backend = self.regions[self.label].backend
-        ppl = backend.pipeline()
-        for p in itertools.imap(lambda k: backend.key_mangler(k), patterns):
-            ppl.keys(p)
-
-        keys = []
-        for rs in ppl.execute():
-            if not rs:
-                continue
-            keys.extend(rs)
-        if len(keys) > 0:
-            backend.delete_multi(keys)
+            self.flush_caches(obj_pk)
 
 
 _flush_signal = signal('flask_sqlalchemy_redica_flush_signal')

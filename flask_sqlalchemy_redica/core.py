@@ -16,7 +16,7 @@ from flask_sqlalchemy import SQLAlchemy, _QueryProperty, Model
 from .utils import _md5_key_mangler
 from .cache import CachingQuery
 from .model import CachingInvalidator, CachingMeta, CeleryCachingInvalidator, \
-    CachingMixin, Cache
+    Cache
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
 
