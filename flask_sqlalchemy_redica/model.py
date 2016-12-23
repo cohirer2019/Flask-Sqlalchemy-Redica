@@ -240,6 +240,9 @@ class CachingConfigure(object):
     #: which relation objects will be notified
     cache_invalidate_notify_relationships = ()
 
+    #: notify with origin all the way to target
+    cache_invalidate_notify_with_origin = False
+
     # private properties
     _initialized = False
     _all_columns = ()
@@ -347,15 +350,20 @@ class CachingMixin(CachingConfigure):
     @classmethod
     def on_model_change(cls, *args):
         sender, ev, _, _, target = args
-        kwargs = dict(module=cls.__module__, model=sender, target=target,
-                      target_id=target.id, event=ev, src='on_model_change')
+        kwargs = dict(event=ev, source='model_change',
+                      module=cls.__module__, model=sender,
+                      target=target, target_id=target.id)
+        if cls.cache_invalidate_notify_with_origin:
+            kwargs.update(
+                dict(origin_module=cls.__module__, origin_model=sender,
+                     origin_target=target, origin_target_id=target.id))
         _flush_signal.send(sender, **kwargs)
 
     @classmethod
     def on_model_invalidate(cls, sender, **kw):
         target = kw.get('target')
         target_id = kw.get('target_id')
-        src = kw.get('src')
+        src = kw.get('source')
         ev = kw.get('event')
 
         if cls.cache_invalidate:
@@ -364,18 +372,18 @@ class CachingMixin(CachingConfigure):
         if not cls.cache_invalidate_notify:
             return
 
-        if src == 'on_model_change' \
+        if src == 'model_change' \
                 and ev == 'update' \
                 and not cls.has_changes(target):
             # for self update, if no changes, then do not notify others
             return
 
         delay = True
-        if ev == 'delete' or src != 'on_model_change':
+        if ev == 'delete' or src != 'model_change':
             # deletion need flush right away
             delay = False
 
-        cls._notify_all(target, ev, delay=delay)
+        cls._notify_all(delay=delay, **kw)
 
     @classmethod
     def has_changes(cls, target, use_all=False):
@@ -406,7 +414,10 @@ class CachingMixin(CachingConfigure):
             yield obj
 
     @classmethod
-    def _notify_all(cls, target, ev, delay=False):
+    def _notify_all(cls, delay=False, **kw):
+        target = kw.get('target')
+        ev = kw.get('event')
+
         if not target:
             return
 
@@ -417,7 +428,11 @@ class CachingMixin(CachingConfigure):
             for obj in cls.relation_changes(target, attr, r):
                 kwargs = dict(
                     module=attr.mapper.class_.__module__, model=sender,
-                    target=obj, target_id=obj.id, event=ev, src='on_notify')
+                    target=obj, target_id=obj.id, event=ev, source='notify',
+                    origin_module=kw.get('origin_module', None),
+                    origin_model=kw.get('origin_model', None),
+                    origin_target=kw.get('origin_target', None),
+                    origin_target_id=kw.get('origin_target_id', None))
                 if delay:
                     invalidator = cls.invalidator()
                     if invalidator:
@@ -447,12 +462,25 @@ class CachingInvalidator(object):
         if current_redica:
             session = current_redica.create_scoped_session()
             for info in items:
-                info['src'] = 'on_flush'
                 module = info.get('module')
                 model = info.get('model')
                 target_id = info.get('target_id')
                 model_cls = getattr(importlib.import_module(module), model)
-                info['target'] = session.query(model_cls).get(target_id)
+                target = session.query(model_cls).get(target_id)
+
+                info['target'] = target
+                info['source'] = 'flush'
+
+                origin_module = info.get('origin_module', None)
+                origin_model = info.get('origin_model', None)
+                origin_target_id = info.get('origin_target_id', None)
+                if origin_module and origin_model and origin_target_id:
+                    origin_model_cls = getattr(
+                        importlib.import_module(origin_module), origin_model)
+                    origin_target = session.query(
+                        origin_model_cls).get(origin_target_id)
+                    info['origin_target'] = origin_target
+
                 _flush_signal.send(model, **info)
             session.close()
 
@@ -465,6 +493,7 @@ class CachingInvalidator(object):
 class CeleryCachingInvalidator(CachingInvalidator):
     def invalidate(self, **kwargs):
         kwargs.pop('target', None)
+        kwargs.pop('origin_target', None)
         super(CeleryCachingInvalidator, self).invalidate(**kwargs)
 
     def flush(self):
