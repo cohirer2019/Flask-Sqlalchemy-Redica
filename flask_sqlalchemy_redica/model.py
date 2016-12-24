@@ -364,12 +364,11 @@ class CachingMixin(CachingConfigure):
     @classmethod
     def on_model_invalidate(cls, sender, **kw):
         target = kw.get('target')
-        target_id = kw.get('target_id')
         src = kw.get('source')
         ev = kw.get('event')
 
         if cls.cache_invalidate:
-            cls._flush_all(target_id, target)
+            cls.on_flush(**kw)
 
         if not cls.cache_invalidate_notify:
             return
@@ -385,7 +384,7 @@ class CachingMixin(CachingConfigure):
             # deletion need flush right away
             delay = False
 
-        cls._notify_all(delay=delay, **kw)
+        cls.on_notify(delay=delay, **kw)
 
     @classmethod
     def has_changes(cls, target, use_all=False):
@@ -416,7 +415,7 @@ class CachingMixin(CachingConfigure):
             yield obj
 
     @classmethod
-    def _notify_all(cls, delay=False, **kw):
+    def on_notify(cls, delay=False, **kw):
         target = kw.get('target')
         ev = kw.get('event')
 
@@ -444,11 +443,17 @@ class CachingMixin(CachingConfigure):
 
     @classmethod
     def _flush_all(cls, target_id, target):
+        if target:
+            cls.cache.flush_all(target)
+        elif target_id:
+            cls.cache.flush_caches(target_id)
+
+    @classmethod
+    def on_flush(cls, **kw):
         if cls.cache_enable and cls.cache_invalidate:
-            if target:
-                cls.cache.flush_all(target)
-            elif target_id:
-                cls.cache.flush_caches(target_id)
+            target = kw.get('target')
+            target_id = kw.get('target_id')
+            cls._flush_all(target_id, target)
 
 
 class CachingInvalidator(object):

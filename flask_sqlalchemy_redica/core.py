@@ -101,7 +101,8 @@ class CachingSQLAlchemy(SQLAlchemy):
     def init_events(self):
         event.listen(Session, 'after_commit', self.cache_flush)
 
-    def cache_flush(self, session):
+    @staticmethod
+    def cache_flush(session):
         ctx = stack.top
         if ctx is not None and hasattr(ctx, 'redica_invalidator'):
             ctx.redica_invalidator.flush()
