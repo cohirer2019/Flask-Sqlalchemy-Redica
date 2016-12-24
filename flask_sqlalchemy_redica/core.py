@@ -11,6 +11,8 @@ try:
 except ImportError:
     from flask import _request_ctx_stack as stack
 
+import flask_sqlalchemy
+
 from flask_sqlalchemy import SQLAlchemy, _QueryProperty, Model
 
 from .utils import _md5_key_mangler
@@ -19,6 +21,14 @@ from .model import CachingInvalidator, CachingMeta, CeleryCachingInvalidator, \
     Cache
 
 DEFAULT_REDICA_KEY_PREFIX = 'redica'
+
+
+def _set_default_query_class(d):
+    if 'query_class' not in d:
+        d['query_class'] = CachingQuery
+
+
+flask_sqlalchemy._set_default_query_class = _set_default_query_class
 
 
 class CachingSQLAlchemy(SQLAlchemy):
