@@ -107,12 +107,14 @@ class Cache(object):
 
         return self.columns
 
-    def from_cache(self, cache_key=None, pk=None, prefix=None):
+    def from_cache(self, cache_key=None, pk=None, prefix=None,
+                   expiration_time=None):
         if pk:
             cache_key = self.cache_key(pk)
+        expiration_time = expiration_time or self.expiration_time
         return FromCache(
             self.label, cache_key, query_prefix=prefix,
-            cache_regions=self.regions, expiration_time=self.expiration_time)
+            cache_regions=self.regions, expiration_time=expiration_time)
 
     def cache_key(self, pk='all', **kwargs):
         q_filter = ''.join('{}={}'.format(k, v) for k, v in kwargs.items()) \
