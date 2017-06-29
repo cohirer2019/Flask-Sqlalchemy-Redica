@@ -117,21 +117,21 @@ class Cache(object):
             cache_regions=self.regions, expiration_time=expiration_time)
 
     def cache_key(self, pk='all', **kwargs):
-        q_filter = ''.join('{}={}'.format(k, v) for k, v in kwargs.items()) \
+        q_filter = u''.join(u'{}={}'.format(k, v) for k, v in kwargs.items()) \
                    or self.pk
-        return "{}:{}:object:{}".format(
+        return u"{}:{}:object:{}".format(
             self.model.__table__, pk, q_filter)
 
     def cache_relationship_key(self, pk, relation_name):
-        return '{}:{}:relationship:{}'.format(
+        return u'{}:{}:relationship:{}'.format(
             self.model.__tablename__, pk, relation_name)
 
     def cache_query_key(self, pk, query_name):
         if query_name:
-            return '{}:{}:query:{}'.format(
+            return u'{}:{}:query:{}'.format(
                 self.model.__tablename__, pk, query_name)
         else:
-            return '{}:{}:query'.format(self.model.__tablename__, pk)
+            return u'{}:{}:query'.format(self.model.__tablename__, pk)
 
     def flush_filters(self, obj):
         keys = self._filter_keys(obj)
