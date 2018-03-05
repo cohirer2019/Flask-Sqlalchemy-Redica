@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import importlib
 import itertools
+import warnings
 
 import functools
 from blinker import signal
@@ -426,6 +427,10 @@ class CachingMixin(CachingConfigure):
         for r in cls.cache_invalidate_notify_relationships:
             attr = mapper.attrs.get(r)
             sender = attr.mapper.class_.__name__
+            if not attr.uselist and not getattr(cls, r).impl.active_history:
+                warnings.warn(
+                    'Scalar relationship %s is with no active_history set. '
+                    'Unfetched instance won\'t be notified.' % attr)
             for obj in cls.relation_changes(target, attr, r):
                 kwargs = dict(
                     module=attr.mapper.class_.__module__, model=sender,
@@ -511,6 +516,7 @@ class CeleryCachingInvalidator(CachingInvalidator):
 
 def default_caching_invalidate(items):
     CachingInvalidator.do_flush(items)
+
 
 caching_attributes = [
     (k, v) for k, v in CachingConfigure.__dict__.items()
