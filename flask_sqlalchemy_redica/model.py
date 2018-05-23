@@ -6,7 +6,7 @@ import warnings
 import functools
 from blinker import signal
 from dogpile.cache.api import NO_VALUE
-from flask_sqlalchemy import _BoundDeclarativeMeta, Model
+from flask_sqlalchemy import DefaultMeta, Model
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy import event, inspect
 from sqlalchemy.orm.attributes import get_history
@@ -523,7 +523,7 @@ caching_attributes = [
     if not k.startswith('__')]
 
 
-class CachingMeta(_BoundDeclarativeMeta):
+class CachingMeta(DefaultMeta):
     def __init__(cls, *args):
         name, bases, dct = args
         super(CachingMeta, cls).__init__(*args)
