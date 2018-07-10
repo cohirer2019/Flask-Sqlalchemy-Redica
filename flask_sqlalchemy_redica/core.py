@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-import functools
-
-from dogpile.cache.region import make_region
 from sqlalchemy import event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session
@@ -13,8 +10,8 @@ except ImportError:
 
 from flask_sqlalchemy import SQLAlchemy, _QueryProperty, Model
 
-from .utils import _md5_key_mangler
 from .cache import CachingQuery
+from .redis import make_redis_region
 from .model import CachingInvalidator, CachingMeta, CeleryCachingInvalidator, \
     Cache
 
@@ -54,9 +51,6 @@ class CachingSQLAlchemy(SQLAlchemy):
 
     def init_regions(self, app):
         if not self.regions:
-            expiration_time = app.config.setdefault(
-                'REDICA_DEFAULT_EXPIRE', 3600)
-            redica_cache_url = app.config.get('REDICA_CACHE_URL')
             if not self.cache_invalidator_class:
                 redica_invalidator_type = app.config.get('REDICA_INVALIDATOR_TYPE')
                 if redica_invalidator_type == 'celery':
@@ -64,19 +58,7 @@ class CachingSQLAlchemy(SQLAlchemy):
                 else:
                     self.cache_invalidator_class = CachingInvalidator
 
-            key_mangler = functools.partial(_md5_key_mangler, self.prefix)
-
-            self.regions = dict(
-                default=make_region().configure(**{
-                    'backend': 'extended_redis_backend',
-                    'expiration_time': expiration_time,
-                    'arguments': {
-                        'url': redica_cache_url,
-                        'redis_expiration_time': expiration_time + 30,
-                        'key_mangler': key_mangler
-                    }
-                })
-            )
+            self.regions = make_redis_region(app, self.prefix)
 
             Cache.default_regions = self.regions
             CachingQuery.default_regions = self.regions
