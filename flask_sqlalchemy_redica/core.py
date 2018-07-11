@@ -35,7 +35,7 @@ class CachingSQLAlchemy(SQLAlchemy):
             kwargs['query_class'] = self.query_cls = kwargs.setdefault(
                 'session_options', {}).setdefault('query_cls', CachingQuery)
 
-        Model.query_class = CachingQuery
+        Model.query_class = self.query_cls
 
         super(CachingSQLAlchemy, self).__init__(app, **kwargs)
 
