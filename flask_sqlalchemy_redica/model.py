@@ -368,16 +368,22 @@ class CachingMixin(CachingConfigure):
         src = kw.get('source')
         ev = kw.get('event')
 
-        if cls.cache_invalidate:
-            cls.on_flush(**kw)
+        dummy_update = (
+            src == 'model_change' and
+            ev == 'update' and
+            not cls.has_changes(target)
+        )
 
-        if not cls.cache_invalidate_notify:
+        if cls.cache_invalidate:
+            if dummy_update:
+                # for self update, if no changes, then neither
+                # flush nor notify others
+                return
+            cls.on_flush(**kw)
+        elif dummy_update:
             return
 
-        if src == 'model_change' \
-                and ev == 'update' \
-                and not cls.has_changes(target):
-            # for self update, if no changes, then do not notify others
+        if not cls.cache_invalidate_notify:
             return
 
         delay = True
